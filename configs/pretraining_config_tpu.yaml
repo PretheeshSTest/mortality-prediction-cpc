@@ -1,7 +1,7 @@
 # TPU Training Configuration
-data_path: "/processed_data"
+data_path: "gs://your-mimic-bucket-name/processed_data"
 data_type: "parquet"
-output_dir: "/output/models"
+output_dir: "gs://your-mimic-bucket-name/models"
 
 # Data parameters
 patient_id_col: "subject_id"
@@ -36,3 +36,7 @@ gradient_clip: 1.0
 use_tpu: true
 tpu_cores: 8
 precision: "bfloat16"
+
+# GCS-specific parameters
+use_gcs: true
+gcs_bucket: "your-mimic-bucket-name"  # Will be overridden by GCS_BUCKET env var

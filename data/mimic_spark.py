@@ -1,8 +1,8 @@
 """
-Spark utilities for processing MIMIC dataset.
+Spark utilities for processing MIMIC dataset using Google Cloud Dataproc.
 
 This module provides functions for efficient processing of the MIMIC dataset
-using Apache Spark, which is essential for handling the scale of the data.
+using Apache Spark via Google Cloud Dataproc service.
 """
 
 import os
@@ -19,30 +19,26 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
-def initialize_spark(app_name="MIMIC-Processing", memory="16g", cores=4):
+def initialize_spark(app_name="MIMIC-Processing"):
     """Initialize a Spark session with appropriate configuration.
+    
+    When running on Dataproc, many configurations are handled automatically.
     
     Args:
         app_name: Name of the Spark application
-        memory: Memory allocation for driver
-        cores: Number of cores to use
         
     Returns:
         Initialized SparkSession
     """
-    logger.info(f"Initializing Spark with {memory} memory and {cores} cores")
+    logger.info(f"Initializing Spark with app name: {app_name}")
     
+    # On Dataproc, default configs are already optimal
     spark = (SparkSession.builder
         .appName(app_name)
-        .config("spark.driver.memory", memory)
-        .config("spark.executor.memory", memory)
-        .config("spark.executor.cores", str(cores))
-        .config("spark.sql.shuffle.partitions", "200")
-        .config("spark.default.parallelism", "200")
         .config("spark.sql.adaptive.enabled", "true")
-        .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
         .getOrCreate())
     
+    logger.info(f"Spark version: {spark.version}")
     return spark
 
 
@@ -50,7 +46,7 @@ def load_mimic_data(data_path, table_name, spark=None):
     """Load MIMIC data into a Spark DataFrame.
     
     Args:
-        data_path: Path to MIMIC data
+        data_path: Path to MIMIC data (can be GCS path gs://)
         table_name: Name of the table to load (e.g., 'chartevents', 'patients')
         spark: SparkSession (created if None)
         
@@ -60,17 +56,24 @@ def load_mimic_data(data_path, table_name, spark=None):
     if spark is None:
         spark = initialize_spark()
     
-    # Determine file format
-    file_path = os.path.join(data_path, f"{table_name}")
-    
-    if os.path.exists(f"{file_path}.csv"):
-        logger.info(f"Loading {table_name} from CSV")
-        df = spark.read.csv(f"{file_path}.csv", header=True, inferSchema=True)
-    elif os.path.exists(f"{file_path}.parquet") or os.path.isdir(f"{file_path}.parquet"):
-        logger.info(f"Loading {table_name} from Parquet")
-        df = spark.read.parquet(f"{file_path}.parquet")
+    # Handle both local and GCS paths
+    if data_path.startswith('gs://'):
+        file_path = os.path.join(data_path, f"{table_name}")
     else:
-        raise FileNotFoundError(f"Could not find {table_name} in {data_path}")
+        file_path = os.path.join(data_path, f"{table_name}")
+    
+    # Try different file formats
+    try:
+        logger.info(f"Attempting to load {table_name} from CSV")
+        df = spark.read.csv(f"{file_path}.csv", header=True, inferSchema=True)
+        logger.info(f"Successfully loaded {table_name} from CSV")
+    except Exception as e:
+        logger.info(f"CSV load failed, trying Parquet: {str(e)}")
+        try:
+            df = spark.read.parquet(f"{file_path}.parquet")
+            logger.info(f"Successfully loaded {table_name} from Parquet")
+        except Exception as e2:
+            raise FileNotFoundError(f"Could not find {table_name} in {data_path}: {str(e2)}")
     
     # Optimize with caching for frequently used tables
     if table_name in ['chartevents', 'patients', 'admissions']:
@@ -85,8 +88,8 @@ def extract_features(spark, data_path, output_path, features=None, window_size=2
     
     Args:
         spark: SparkSession
-        data_path: Path to MIMIC data
-        output_path: Path to save processed data
+        data_path: Path to MIMIC data (can be GCS path)
+        output_path: Path to save processed data (can be GCS path)
         features: List of specific features to extract (None for auto-select)
         window_size: Window size in hours for temporal aggregation
         step_size: Step size in hours for sliding windows
@@ -95,6 +98,8 @@ def extract_features(spark, data_path, output_path, features=None, window_size=2
         Path to processed data
     """
     logger.info("Starting feature extraction pipeline")
+    logger.info(f"Input path: {data_path}")
+    logger.info(f"Output path: {output_path}")
     
     # Load relevant tables
     chartevents = load_mimic_data(data_path, "chartevents", spark)
@@ -216,16 +221,18 @@ def extract_features(spark, data_path, output_path, features=None, window_size=2
         demographics.hospital_mortality
     )
     
-    # Write output
-    os.makedirs(output_path, exist_ok=True)
+    # Write output directly to the specified path (works with GCS paths)
     output_file = os.path.join(output_path, "processed_mimic")
     
     logger.info(f"Writing processed data to {output_file}")
-    final_dataset.write.parquet(output_file)
+    # Partitioning by subject_id for optimized access patterns
+    final_dataset.write.partitionBy("subject_id").parquet(output_file)
     
     # Also save a small sample as CSV for inspection
+    # For GCS paths, we'll write to a specific path
+    sample_output = f"{output_file}_sample.csv"
     sample = final_dataset.limit(1000)
-    sample.toPandas().to_csv(f"{output_file}_sample.csv", index=False)
+    sample.write.csv(sample_output, header=True)
     
     logger.info("Feature extraction complete")
     return output_file
@@ -236,8 +243,8 @@ def create_train_validate_test_split(spark, data_path, output_path, val_ratio=0.
     
     Args:
         spark: SparkSession
-        data_path: Path to processed data
-        output_path: Path to save split data
+        data_path: Path to processed data (can be GCS path)
+        output_path: Path to save split data (can be GCS path)
         val_ratio: Proportion for validation set
         test_ratio: Proportion for test set
         
@@ -245,6 +252,7 @@ def create_train_validate_test_split(spark, data_path, output_path, val_ratio=0.
         Dictionary with paths to train, val, and test data
     """
     logger.info("Creating train/validation/test splits")
+    logger.info(f"Loading data from: {data_path}")
     
     # Load processed data
     data = spark.read.parquet(data_path)
@@ -271,8 +279,7 @@ def create_train_validate_test_split(spark, data_path, output_path, val_ratio=0.
     val_data = data.filter(col("subject_id").isin(val_patient_ids))
     test_data = data.filter(col("subject_id").isin(test_patient_ids))
     
-    # Save splits
-    os.makedirs(output_path, exist_ok=True)
+    # Save splits (works with GCS paths)
     train_path = os.path.join(output_path, "train")
     val_path = os.path.join(output_path, "val")
     test_path = os.path.join(output_path, "test")
@@ -293,9 +300,11 @@ def create_train_validate_test_split(spark, data_path, output_path, val_ratio=0.
 def main(data_path, output_path, features=None):
     """Main function to process MIMIC data with Spark.
     
+    This function is designed to be called directly when running as a Dataproc job.
+    
     Args:
-        data_path: Path to raw MIMIC data
-        output_path: Path to save processed data
+        data_path: Path to raw MIMIC data (can be GCS path)
+        output_path: Path to save processed data (can be GCS path)
         features: List of specific features to extract
         
     Returns:
@@ -319,9 +328,9 @@ def main(data_path, output_path, features=None):
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Process MIMIC data with Spark")
-    parser.add_argument("--data_path", required=True, help="Path to raw MIMIC data")
-    parser.add_argument("--output_path", required=True, help="Path to save processed data")
+    parser = argparse.ArgumentParser(description="Process MIMIC data with Spark on Dataproc")
+    parser.add_argument("--data_path", required=True, help="Path to raw MIMIC data (can be GCS path gs://)")
+    parser.add_argument("--output_path", required=True, help="Path to save processed data (can be GCS path gs://)")
     parser.add_argument("--features", nargs="+", type=int, help="Specific features to extract")
     
     args = parser.parse_args()

@@ -9,11 +9,7 @@ echo "Setting up environment for CPC training on GCP"
 # Install required packages
 echo "Installing system packages..."
 sudo apt-get update
-sudo apt-get install -y openjdk-8-jdk python3-pip
-
-# Set up environment variables
-export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
-export PATH=$PATH:$JAVA_HOME/bin
+sudo apt-get install -y python3-pip
 
 # Set up Python environment
 echo "Setting up Python environment..."
@@ -24,14 +20,10 @@ echo "Installing JAX with TPU support..."
 pip install "jax[tpu]>=0.2.16" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
 pip install flax optax
 
-# Install Spark
-echo "Installing Apache Spark..."
-wget https://archive.apache.org/dist/spark/spark-3.3.2/spark-3.3.2-bin-hadoop3.tgz
-tar -xvzf spark-3.3.2-bin-hadoop3.tgz
-sudo mv spark-3.3.2-bin-hadoop3 /opt/spark
-echo "export SPARK_HOME=/opt/spark" >> ~/.bashrc
-echo "export PATH=\$PATH:\$SPARK_HOME/bin" >> ~/.bashrc
-source ~/.bashrc
+# Install GCloud packages
+echo "Installing Google Cloud packages..."
+pip install google-cloud-storage
+pip install google-api-python-client
 
 # Clone project repository
 echo "Cloning project repository..."
@@ -41,7 +33,6 @@ cd mortality-prediction-cpc
 # Install project dependencies
 echo "Installing project dependencies..."
 pip install -r requirements.txt
-pip install pyspark==3.3.2
 
 # Create additional requirements for JAX/TPU training
 cat > requirements-tpu.txt << EOL
@@ -52,6 +43,7 @@ tensorflow>=2.7.0
 tensorflow-datasets>=4.4.0
 wandb>=0.12.0
 pyarrow>=6.0.0
+google-cloud-storage>=2.0.0
 EOL
 
 pip install -r requirements-tpu.txt
@@ -60,15 +52,17 @@ pip install -r requirements-tpu.txt
 echo "Creating output directories..."
 mkdir -p /output/models
 mkdir -p /output/logs
-mkdir -p /processed_data
 
 # Set up TPU access (customize these according to your actual TPU setup)
 echo "export TPU_NAME=\${TPU_NAME:-cpc-tpu-pod}" >> ~/.bashrc
 echo "export TPU_ZONE=\${TPU_ZONE:-us-central1-b}" >> ~/.bashrc
+
+# Set up default GCS bucket for model outputs
+echo "export GCS_BUCKET=\${GCS_BUCKET:-your-gcs-bucket}" >> ~/.bashrc
 source ~/.bashrc
 
 echo "Environment setup complete!"
 echo "Next steps:"
-echo "1. Configure your data path and ensure MIMIC dataset is accessible"
-echo "2. Run data preprocessing: python data/mimic_spark.py --data_path /path/to/mimic --output_path /processed_data"
+echo "1. Update your GCS_BUCKET environment variable with your actual GCS bucket name"
+echo "2. Process data with Dataproc: follow the instructions in GCP_DEPLOYMENT.md"
 echo "3. Start training: python scripts/pretrain_cpc_jax.py --config configs/pretraining_config_tpu.yaml"
